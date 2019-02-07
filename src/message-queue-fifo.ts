@@ -6,7 +6,7 @@ import {
   MessageQueue,
   PipelinePromise,
 } from '@electricui/core'
-import { TYPES } from '@electricui/protocol-binary-constants'
+import { MAX_ACK_NUM, TYPES } from '@electricui/protocol-binary-constants'
 
 const dQueue = require('debug')('electricui-protocol-binary-fifo-queue:queue')
 
@@ -15,7 +15,6 @@ type Resolver = (value: any) => void
 class QueuedMessage {
   message: Message
   resolves: Array<Resolver>
-  retries: number = 0
 
   constructor(message: Message, resolve: Resolver) {
     this.message = message
@@ -43,7 +42,6 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
   concurrentMessages: number
   intervalReference: NodeJS.Timer | null = null
   interval: number
-  retries: number
   messagesInTransit: number = 0
 
   constructor(options: MessageQueueBinaryFIFOOptions) {
@@ -59,7 +57,6 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     this.tick = this.tick.bind(this)
 
     this.interval = options.interval || 50
-    this.retries = options.retries || 3
 
     // Get notified when the device disconnects from everything
     options.device.on(DEVICE_EVENTS.CONNECTION, this.onConnect)
@@ -171,13 +168,14 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
         .catch(err => {
           console.error('Message failed', err, msg.message)
 
-          // Add a retry
-          msg.retries += 1
+          // Increment the ackNum, it's our retry counter
+          msg.message.metadata.ackNum += 1
 
           // A message is no longer in transit, reduce the count
           this.messagesInTransit -= 1
 
-          if (msg.retries > this.retries) {
+          // If it's exceeded the max ack number, fail it out
+          if (msg.message.metadata.ackNum > MAX_ACK_NUM) {
             for (const resolve of msg.resolves) {
               resolve(Promise.reject(err))
             }
