@@ -187,12 +187,6 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
           this.messages.unshift(msg)
         })
     }
-
-    dQueue(
-      `Tick Complete - Queue length: ${
-        this.messages.length
-      }, messages in transit: ${this.messagesInTransit}`,
-    )
   }
 }
 
