@@ -132,6 +132,11 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
    *
    */
   tick() {
+    if (this.messages.length === 0) {
+      // exit early silently
+      return
+    }
+
     dQueue(
       `Tick Start - Queue length: ${
         this.messages.length
