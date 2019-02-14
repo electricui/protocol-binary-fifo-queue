@@ -68,6 +68,10 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
       throw new Error('The device needs a messageRouter set')
     }
 
+    dQueue(
+      `Queuing message`, message,
+    )
+
     // Return a promise that will resolve with the promise of the write, when it writes
     return new Promise((resolve, reject) => {
       // Check if the current packet matches the previous one
@@ -84,12 +88,21 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
       ) {
         // deduplicate
         lastInQueue.addResolve(resolve)
+
+        dQueue(
+          `deduplicating message`, message,
+        )
       } else {
         // new packet
-
         const queuedMessage = new QueuedMessage(message, resolve)
 
         this.messages.push(queuedMessage)
+
+        dQueue(
+          `New message`, message,
+        )
+
+        this.tick()
       }
     })
   }
@@ -107,6 +120,10 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
   onConnect() {
     this.intervalReference = setInterval(this.tick, this.interval)
 
+    dQueue(
+      `Spinning up queue loop`,
+    )
+
     // clear the queue.
     this.clearQueue()
 
@@ -117,6 +134,10 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     if (this.intervalReference) {
       clearInterval(this.intervalReference)
     }
+
+    dQueue(
+      `Spinning down queue loop`,
+    )
 
     // clear the queue
     this.clearQueue()
