@@ -43,6 +43,7 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
   intervalReference: NodeJS.Timer | null = null
   interval: number
   messagesInTransit: number = 0
+  retries: number
 
   constructor(options: MessageQueueBinaryFIFOOptions) {
     super(options.device)
@@ -58,6 +59,8 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
 
     this.interval = options.interval || 50
 
+    this.retries = options.retries || 3
+
     // Get notified when the device disconnects from everything
     options.device.on(DEVICE_EVENTS.CONNECTION, this.onConnect)
     options.device.on(DEVICE_EVENTS.DISCONNECTION, this.onDisconnect)
@@ -68,9 +71,13 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
       throw new Error('The device needs a messageRouter set')
     }
 
-    dQueue(
-      `Queuing message`, message,
-    )
+    dQueue(`Queuing message`, message)
+
+    // add the retry counter if it doesn't exist yet
+
+    if (typeof message.metadata._retry === 'undefined') {
+      message.metadata._retry = 0
+    }
 
     // Return a promise that will resolve with the promise of the write, when it writes
     return new Promise((resolve, reject) => {
@@ -89,18 +96,14 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
         // deduplicate
         lastInQueue.addResolve(resolve)
 
-        dQueue(
-          `deduplicating message`, message,
-        )
+        dQueue(`deduplicating message`, message)
       } else {
         // new packet
         const queuedMessage = new QueuedMessage(message, resolve)
 
         this.messages.push(queuedMessage)
 
-        dQueue(
-          `New message`, message,
-        )
+        dQueue(`New message`, message)
 
         this.tick()
       }
@@ -120,9 +123,7 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
   onConnect() {
     this.intervalReference = setInterval(this.tick, this.interval)
 
-    dQueue(
-      `Spinning up queue loop`,
-    )
+    dQueue(`Spinning up queue loop`)
 
     // clear the queue.
     this.clearQueue()
@@ -135,9 +136,7 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
       clearInterval(this.intervalReference)
     }
 
-    dQueue(
-      `Spinning down queue loop`,
-    )
+    dQueue(`Spinning down queue loop`)
 
     // clear the queue
     this.clearQueue()
@@ -194,8 +193,13 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
         .catch(err => {
           console.error('Message failed', err, msg.message)
 
-          // Increment the ackNum, it's our retry counter
-          msg.message.metadata.ackNum += 1
+          // Increment the ackNum if it's an ack message
+          if (msg.message.metadata.ack) {
+            msg.message.metadata.ackNum += 1
+          }
+
+          // increment the retry counter
+          msg.message.metadata._retry += 1
 
           // A message is no longer in transit, reduce the count
           this.messagesInTransit -= 1
@@ -209,7 +213,17 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
             return
           }
 
+          // If it's exceeded the max retry number, fail it out
+          if (msg.message.metadata._retry > this.retries) {
+            for (const resolve of msg.resolves) {
+              resolve(Promise.reject(err))
+            }
+
+            return
+          }
+
           // add it back to the queue and try again if we have retries left
+          console.log('retrying message', msg)
           this.messages.unshift(msg)
         })
     }
