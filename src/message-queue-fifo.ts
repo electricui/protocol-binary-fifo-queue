@@ -87,6 +87,8 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
       ]
 
       // Check if we can deduplicate the packet
+      // TODO: Expose this to the developer so they can tell us which messageIDs can be treated like
+      // a key value store
       if (
         lastInQueue !== undefined &&
         lastInQueue.message.messageID === message.messageID &&
