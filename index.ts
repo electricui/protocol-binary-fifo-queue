@@ -1,1 +1,4 @@
-export { MessageQueueBinaryFIFO } from './src/message-queue-fifo'
+export {
+  MessageQueueBinaryFIFO,
+  MessageQueueBinaryFIFOOptions,
+} from './src/message-queue-fifo'

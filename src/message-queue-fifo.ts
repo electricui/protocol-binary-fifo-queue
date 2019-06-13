@@ -15,24 +15,35 @@ type Resolver = (value: any) => void
 class QueuedMessage {
   message: Message
   resolves: Array<Resolver>
+  rejections: Array<Resolver>
 
-  constructor(message: Message, resolve: Resolver) {
+  constructor(message: Message, resolve: Resolver, reject: Resolver) {
     this.message = message
     this.resolves = [resolve]
+    this.rejections = [reject]
 
     this.addResolve = this.addResolve.bind(this)
+    this.addReject = this.addReject.bind(this)
   }
 
   addResolve(resolve: Resolver) {
     this.resolves.push(resolve)
   }
+
+  addReject(reject: Resolver) {
+    this.rejections.push(reject)
+  }
 }
 
-interface MessageQueueBinaryFIFOOptions {
+export interface MessageQueueBinaryFIFOOptions {
   device: Device
   concurrentMessages?: number
   interval?: number
   retries?: number
+  /**
+   * These are messageIDs that cannot be deduplicated while in the queue
+   */
+  nonIdempotentMessageIDs?: Array<string>
 }
 /**
  * Holds a device level message queue
@@ -44,11 +55,17 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
   interval: number
   messagesInTransit: number = 0
   retries: number
+  nonIdempotentMessageIDs: Array<string>
 
   constructor(options: MessageQueueBinaryFIFOOptions) {
     super(options.device)
 
-    this.concurrentMessages = options.concurrentMessages || 100
+    // 0 is an 'acceptable' number for testing, so explicitly check for undefined
+    if (typeof options.concurrentMessages === 'undefined') {
+      this.concurrentMessages = 100
+    } else {
+      this.concurrentMessages = options.concurrentMessages
+    }
 
     this.canRoute = this.canRoute.bind(this)
 
@@ -61,6 +78,8 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
 
     this.retries = options.retries || 3
 
+    this.nonIdempotentMessageIDs = options.nonIdempotentMessageIDs || []
+
     // Get notified when the device disconnects from everything
     options.device.on(DEVICE_EVENTS.CONNECTION, this.onConnect)
     options.device.on(DEVICE_EVENTS.DISCONNECTION, this.onDisconnect)
@@ -71,7 +90,7 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
       throw new Error('The device needs a messageRouter set')
     }
 
-    dQueue(`Queuing message`, message)
+    dQueue(`Queuing message`, message.messageID)
 
     // add the retry counter if it doesn't exist yet
 
@@ -81,34 +100,82 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
 
     // Return a promise that will resolve with the promise of the write, when it writes
     return new Promise((resolve, reject) => {
-      // Check if the current packet matches the previous one
-      const lastInQueue: QueuedMessage | undefined = this.messages[
-        this.messages.length - 1
-      ]
+      // check if this message is on the list of non-idempotent messageIDs
+      if (!this.nonIdempotentMessageIDs.includes(message.messageID)) {
+        // iterate over all the messages in the queue
+        for (const [index, inQueue] of this.messages.entries()) {
+          // check if it has the same messageID, if not, next message
+          if (inQueue.message.messageID !== message.messageID) {
+            continue
+          }
 
-      // Check if we can deduplicate the packet
-      // TODO: Expose this to the developer so they can tell us which messageIDs can be treated like
-      // a key value store
-      if (
-        lastInQueue !== undefined &&
-        lastInQueue.message.messageID === message.messageID &&
-        message.metadata.type !== TYPES.CALLBACK &&
-        deepEqual(lastInQueue.message.metadata, message.metadata)
-      ) {
-        // deduplicate
-        lastInQueue.addResolve(resolve)
+          // if they're namespaced internal / developer differently, continue
+          if (inQueue.message.metadata.internal !== message.metadata.internal) {
+            continue
+          }
 
-        dQueue(`deduplicating message`, message)
+          // if the types are different, continue
+          if (inQueue.message.metadata.type !== message.metadata.type) {
+            continue
+          }
+
+          // if inQueue has an offset that's different to this offset, continue
+          if (inQueue.message.metadata.offset !== message.metadata.offset) {
+            continue
+          }
+
+          // if inQueue has an ackNum that's different to this ackNum, continue
+          if (inQueue.message.metadata.ackNum !== message.metadata.ackNum) {
+            continue
+          }
+
+          // if one has an ack and one doesn't, we CAN deduplicate
+          // we go 'true' unless both are false
+          const ack = inQueue.message.metadata.ack || message.metadata.ack
+
+          // if one is a query and one isn't a query, we CAN deduplicate
+          const query = inQueue.message.metadata.query || message.metadata.query
+
+          // build the payload
+          let payload = null
+
+          // if the old message isn't null, we override with that
+          if (inQueue.message.payload !== null) {
+            payload = inQueue.message.payload
+          }
+
+          // if the new message isn't null, we then override with that
+          if (message.payload !== null) {
+            payload = message.payload
+          }
+
+          // deduplicate this message
+          inQueue.addResolve(resolve)
+          inQueue.addReject(reject)
+
+          // mutate the things we could have changed
+          this.messages[index].message.metadata.ack = ack
+          this.messages[index].message.metadata.query = query
+          this.messages[index].message.payload = payload
+
+          dQueue(`deduplicating message`, message)
+          this.tick()
+          return
+        }
       } else {
-        // new packet
-        const queuedMessage = new QueuedMessage(message, resolve)
-
-        this.messages.push(queuedMessage)
-
-        dQueue(`New message`, message)
-
-        this.tick()
+        dQueue(`message is non idempotent`, message.messageID)
       }
+
+      // this message isn't goign to be deduplicated
+
+      const queuedMessage = new QueuedMessage(message, resolve, reject)
+
+      this.messages.push(queuedMessage)
+
+      dQueue(`New message`, message.messageID)
+
+      this.tick()
+      return
     })
   }
 
@@ -188,9 +255,6 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
           for (const resolve of msg.resolves) {
             resolve(val)
           }
-
-          // A message is no longer in transit, reduce the count
-          this.messagesInTransit -= 1
         })
         .catch(err => {
           console.error('Message failed', err, msg.message)
@@ -203,13 +267,10 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
           // increment the retry counter
           msg.message.metadata._retry += 1
 
-          // A message is no longer in transit, reduce the count
-          this.messagesInTransit -= 1
-
           // If it's exceeded the max ack number, fail it out
           if (msg.message.metadata.ackNum > MAX_ACK_NUM) {
-            for (const resolve of msg.resolves) {
-              resolve(Promise.reject(err))
+            for (const reject of msg.rejections) {
+              reject(err)
             }
 
             return
@@ -217,8 +278,8 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
 
           // If it's exceeded the max retry number, fail it out
           if (msg.message.metadata._retry > this.retries) {
-            for (const resolve of msg.resolves) {
-              resolve(Promise.reject(err))
+            for (const reject of msg.rejections) {
+              reject(err)
             }
 
             return
@@ -227,6 +288,10 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
           // add it back to the queue and try again if we have retries left
           console.log('retrying message', msg)
           this.messages.unshift(msg)
+        })
+        .finally(() => {
+          // A message is no longer in transit, reduce the count
+          this.messagesInTransit -= 1
         })
     }
   }
