@@ -16,6 +16,7 @@ class QueuedMessage {
   message: Message
   resolves: Array<Resolver>
   rejections: Array<Resolver>
+  retries: number = 0
 
   constructor(message: Message, resolve: Resolver, reject: Resolver) {
     this.message = message
@@ -92,12 +93,6 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
 
     dQueue(`Queuing message`, message.messageID)
 
-    // add the retry counter if it doesn't exist yet
-
-    if (typeof message.metadata._retry === 'undefined') {
-      message.metadata._retry = 0
-    }
-
     // Return a promise that will resolve with the promise of the write, when it writes
     return new Promise((resolve, reject) => {
       // check if this message is on the list of non-idempotent messageIDs
@@ -141,11 +136,21 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
 
           // if the old message isn't null, we override with that
           if (inQueue.message.payload !== null) {
+            dQueue(
+              'Deduplicating message in queue',
+              "Old message's payload isn't null, overwriting with that payload",
+              inQueue.message.payload,
+            )
             payload = inQueue.message.payload
           }
 
           // if the new message isn't null, we then override with that
           if (message.payload !== null) {
+            dQueue(
+              'Deduplicating message in queue',
+              "New message's payload isn't null, overwriting with that payload",
+              message.payload,
+            )
             payload = message.payload
           }
 
@@ -158,7 +163,12 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
           this.messages[index].message.metadata.query = query
           this.messages[index].message.payload = payload
 
-          dQueue(`deduplicating message`, message)
+          dQueue(
+            `deduplicating message`,
+            message,
+            'with',
+            this.messages[index].message,
+          )
           this.tick()
           return
         }
@@ -227,9 +237,7 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     }
 
     dQueue(
-      `Tick Start - Queue length: ${
-        this.messages.length
-      }, messages in transit: ${this.messagesInTransit}`,
+      `Tick Start - Queue length: ${this.messages.length}, messages in transit: ${this.messagesInTransit}`,
     )
 
     if (!this.canRoute()) {
@@ -243,33 +251,52 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
       this.messages.length > 0 &&
       this.messagesInTransit < this.concurrentMessages
     ) {
-      const msg = this.messages.shift()!
+      const dequeuedMessage = this.messages.shift()!
+
+      // Clone the message
+      const clonedMessage = Message.from(dequeuedMessage.message)
 
       // Add to our counter of messages in transit
       this.messagesInTransit += 1
 
+      dQueue(
+        `Routing message`,
+        dequeuedMessage,
+        dequeuedMessage.message,
+        dequeuedMessage.message.payload,
+      )
+      dQueue(
+        `- Queue length: ${this.messages.length}, messages in transit: ${this.messagesInTransit}`,
+      )
+
       this.device
-        .messageRouter!.route(msg.message)
+        .messageRouter!.route(clonedMessage)
         .then(val => {
           // call all the resolvers
-          for (const resolve of msg.resolves) {
+          for (const resolve of dequeuedMessage.resolves) {
             resolve(val)
           }
         })
         .catch(err => {
-          console.error('Message failed', err, msg.message)
+          console.error(
+            'Message failed',
+            err,
+            dequeuedMessage,
+            'which became',
+            clonedMessage,
+          )
 
-          // Increment the ackNum if it's an ack message
-          if (msg.message.metadata.ack) {
-            msg.message.metadata.ackNum += 1
+          // Increment the ackNum if it's an ack message on our copy of it
+          if (dequeuedMessage.message.metadata.ack) {
+            dequeuedMessage.message.metadata.ackNum += 1
           }
 
           // increment the retry counter
-          msg.message.metadata._retry += 1
+          dequeuedMessage.retries += 1
 
           // If it's exceeded the max ack number, fail it out
-          if (msg.message.metadata.ackNum > MAX_ACK_NUM) {
-            for (const reject of msg.rejections) {
+          if (dequeuedMessage.message.metadata.ackNum > MAX_ACK_NUM) {
+            for (const reject of dequeuedMessage.rejections) {
               reject(err)
             }
 
@@ -277,8 +304,8 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
           }
 
           // If it's exceeded the max retry number, fail it out
-          if (msg.message.metadata._retry > this.retries) {
-            for (const reject of msg.rejections) {
+          if (dequeuedMessage.retries > this.retries) {
+            for (const reject of dequeuedMessage.rejections) {
               reject(err)
             }
 
@@ -286,8 +313,8 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
           }
 
           // add it back to the queue and try again if we have retries left
-          console.log('retrying message', msg)
-          this.messages.unshift(msg)
+          // console.log('retrying message', dequeuedMessage)
+          this.messages.unshift(dequeuedMessage)
         })
         .finally(() => {
           // A message is no longer in transit, reduce the count
