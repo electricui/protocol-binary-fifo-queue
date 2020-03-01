@@ -1,10 +1,12 @@
+import {} from '@electricui/build-rollup-config'
+
 import {
-  deepEqual,
-  Device,
   DEVICE_EVENTS,
+  Device,
   Message,
   MessageQueue,
   PipelinePromise,
+  deepEqual,
 } from '@electricui/core'
 import { MAX_ACK_NUM, TYPES } from '@electricui/protocol-binary-constants'
 
@@ -17,11 +19,18 @@ class QueuedMessage {
   resolves: Array<Resolver>
   rejections: Array<Resolver>
   retries: number = 0
+  trace: string
 
-  constructor(message: Message, resolve: Resolver, reject: Resolver) {
+  constructor(
+    message: Message,
+    resolve: Resolver,
+    reject: Resolver,
+    trace: string,
+  ) {
     this.message = message
     this.resolves = [resolve]
     this.rejections = [reject]
+    this.trace = trace
 
     this.addResolve = this.addResolve.bind(this)
     this.addReject = this.addReject.bind(this)
@@ -178,7 +187,12 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
 
       // this message isn't goign to be deduplicated
 
-      const queuedMessage = new QueuedMessage(message, resolve, reject)
+      let trace = ''
+      if (__DEV__) {
+        trace = Error().stack ?? ''
+      }
+
+      const queuedMessage = new QueuedMessage(message, resolve, reject, trace)
 
       this.messages.push(queuedMessage)
 
@@ -277,14 +291,9 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
             resolve(val)
           }
         })
-        .catch(err => {
-          console.error(
-            'Message failed',
-            err,
-            dequeuedMessage,
-            'which became',
-            clonedMessage,
-          )
+        .catch((err: Error) => {
+          // Set the trace
+          err.stack = `${err.stack ?? ''} Caused by ${dequeuedMessage.trace}`
 
           // Increment the ackNum if it's an ack message on our copy of it
           if (dequeuedMessage.message.metadata.ack) {
