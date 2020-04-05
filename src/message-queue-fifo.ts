@@ -6,9 +6,8 @@ import {
   Message,
   MessageQueue,
   PipelinePromise,
-  deepEqual,
 } from '@electricui/core'
-import { MAX_ACK_NUM, TYPES } from '@electricui/protocol-binary-constants'
+import { MAX_ACK_NUM, MESSAGEIDS } from '@electricui/protocol-binary-constants'
 
 const dQueue = require('debug')('electricui-protocol-binary-fifo-queue:queue')
 
@@ -54,6 +53,10 @@ export interface MessageQueueBinaryFIFOOptions {
    * These are messageIDs that cannot be deduplicated while in the queue
    */
   nonIdempotentMessageIDs?: Array<string>
+  /**
+   * One shot MessageIDs are never retried
+   */
+  oneShotMessageIDs?: Array<string>
 }
 /**
  * Holds a device level message queue
@@ -66,6 +69,7 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
   messagesInTransit: number = 0
   retries: number
   nonIdempotentMessageIDs: Array<string>
+  oneShotMessageIDs: Array<string>
 
   constructor(options: MessageQueueBinaryFIFOOptions) {
     super(options.device)
@@ -89,6 +93,8 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     this.retries = options.retries || 3
 
     this.nonIdempotentMessageIDs = options.nonIdempotentMessageIDs || []
+
+    this.oneShotMessageIDs = options.oneShotMessageIDs ?? []
 
     // Get notified when the device disconnects from everything
     options.device.on(DEVICE_EVENTS.CONNECTION, this.onConnect)
@@ -285,7 +291,7 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
 
       this.device
         .messageRouter!.route(clonedMessage)
-        .then(val => {
+        .then((val) => {
           // call all the resolvers
           for (const resolve of dequeuedMessage.resolves) {
             resolve(val)
@@ -302,6 +308,17 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
 
           // increment the retry counter
           dequeuedMessage.retries += 1
+
+          // If it's a one shot message, don't do any retries
+          if (
+            this.oneShotMessageIDs.includes(dequeuedMessage.message.messageID)
+          ) {
+            for (const reject of dequeuedMessage.rejections) {
+              reject(err)
+            }
+
+            return
+          }
 
           // If it's exceeded the max ack number, fail it out
           if (dequeuedMessage.message.metadata.ackNum > MAX_ACK_NUM) {
@@ -332,5 +349,3 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     }
   }
 }
-
-// return
