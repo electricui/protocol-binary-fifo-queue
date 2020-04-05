@@ -320,6 +320,18 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
             return
           }
 
+          // If it's a heartbeat message, don't do any retries.
+          if (
+            dequeuedMessage.message.metadata.internal === true &&
+            dequeuedMessage.message.messageID === MESSAGEIDS.HEARTBEAT
+          ) {
+            for (const reject of dequeuedMessage.rejections) {
+              reject(err)
+            }
+
+            return
+          }
+
           // If it's exceeded the max ack number, fail it out
           if (dequeuedMessage.message.metadata.ackNum > MAX_ACK_NUM) {
             for (const reject of dequeuedMessage.rejections) {
