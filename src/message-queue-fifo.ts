@@ -213,10 +213,11 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     for (const msg of this.messages) {
       for (const resolve of msg.resolves) {
         // Reject all promises with a disconnection message
-        resolve(Promise.reject('Device Disconnected'))
+        resolve(Promise.reject(new Error("Clearing Message Queue")))
       }
     }
     this.messages = []
+    this.messagesInTransit = 0
   }
 
   onConnect() {
@@ -312,18 +313,6 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
           // If it's a one shot message, don't do any retries
           if (
             this.oneShotMessageIDs.includes(dequeuedMessage.message.messageID)
-          ) {
-            for (const reject of dequeuedMessage.rejections) {
-              reject(err)
-            }
-
-            return
-          }
-
-          // If it's a heartbeat message, don't do any retries.
-          if (
-            dequeuedMessage.message.metadata.internal === true &&
-            dequeuedMessage.message.messageID === MESSAGEIDS.HEARTBEAT
           ) {
             for (const reject of dequeuedMessage.rejections) {
               reject(err)
