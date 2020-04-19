@@ -7,9 +7,11 @@ import {
   MessageQueue,
   PipelinePromise,
 } from '@electricui/core'
-import { MAX_ACK_NUM, MESSAGEIDS } from '@electricui/protocol-binary-constants'
 
-const dQueue = require('debug')('electricui-protocol-binary-fifo-queue:queue')
+import { MAX_ACK_NUM } from '@electricui/protocol-binary-constants'
+import debug from 'debug'
+
+const dQueue = debug('electricui-protocol-binary-fifo-queue:queue')
 
 type Resolver = (value: any) => void
 
@@ -18,13 +20,13 @@ class QueuedMessage {
   resolves: Array<Resolver>
   rejections: Array<Resolver>
   retries: number = 0
-  trace: string
+  trace: string | undefined
 
   constructor(
     message: Message,
     resolve: Resolver,
     reject: Resolver,
-    trace: string,
+    trace: string | undefined,
   ) {
     this.message = message
     this.resolves = [resolve]
@@ -82,6 +84,7 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     }
 
     this.canRoute = this.canRoute.bind(this)
+    this.routeMessage = this.routeMessage.bind(this)
 
     this.onConnect = this.onConnect.bind(this)
     this.onDisconnect = this.onDisconnect.bind(this)
@@ -107,6 +110,11 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     }
 
     dQueue(`Queuing message`, message.messageID)
+
+    let stackTrace: string | undefined
+    if (__DEV__) {
+      stackTrace = new Error().stack
+    }
 
     // Return a promise that will resolve with the promise of the write, when it writes
     return new Promise((resolve, reject) => {
@@ -193,12 +201,12 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
 
       // this message isn't goign to be deduplicated
 
-      let trace = ''
-      if (__DEV__) {
-        trace = Error().stack ?? ''
-      }
-
-      const queuedMessage = new QueuedMessage(message, resolve, reject, trace)
+      const queuedMessage = new QueuedMessage(
+        message,
+        resolve,
+        reject,
+        stackTrace,
+      )
 
       this.messages.push(queuedMessage)
 
@@ -213,7 +221,7 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     for (const msg of this.messages) {
       for (const resolve of msg.resolves) {
         // Reject all promises with a disconnection message
-        resolve(Promise.reject(new Error("Clearing Message Queue")))
+        resolve(Promise.reject(new Error('Clearing Message Queue')))
       }
     }
     this.messages = []
@@ -248,6 +256,75 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     return this.device.messageRouter!.canRoute()
   }
 
+  async routeMessage(dequeuedMessage: QueuedMessage) {
+    // Clone the message
+    const clonedMessage = Message.from(dequeuedMessage.message)
+
+    dQueue(
+      `Routing message`,
+      dequeuedMessage,
+      dequeuedMessage.message,
+      dequeuedMessage.message.payload,
+    )
+
+    dQueue(
+      `- Queue length: ${this.messages.length}, messages in transit: ${this.messagesInTransit}`,
+    )
+
+    try {
+      const val = await this.device.messageRouter!.route(clonedMessage)
+
+      for (const resolve of dequeuedMessage.resolves) {
+        resolve(val)
+      }
+    } catch (err) {
+      const stackTrace = dequeuedMessage.trace
+      // Transfer the stack if it exists
+      if (stackTrace) {
+        err.stack = `${err.stack ?? ''} Caused by ${stackTrace}`
+      }
+
+      // Increment the ackNum if it's an ack message on our copy of it
+      if (dequeuedMessage.message.metadata.ack) {
+        dequeuedMessage.message.metadata.ackNum += 1
+      }
+
+      // increment the retry counter
+      dequeuedMessage.retries += 1
+
+      // If it's a one shot message, don't do any retries
+      if (this.oneShotMessageIDs.includes(dequeuedMessage.message.messageID)) {
+        for (const reject of dequeuedMessage.rejections) {
+          reject(err)
+        }
+
+        return
+      }
+
+      // If it's exceeded the max ack number, fail it out
+      if (dequeuedMessage.message.metadata.ackNum > MAX_ACK_NUM) {
+        for (const reject of dequeuedMessage.rejections) {
+          reject(err)
+        }
+
+        return
+      }
+
+      // If it's exceeded the max retry number, fail it out
+      if (dequeuedMessage.retries > this.retries) {
+        for (const reject of dequeuedMessage.rejections) {
+          reject(err)
+        }
+
+        return
+      }
+
+      // add it back to the queue and try again if we have retries left
+      // console.log('retrying message', dequeuedMessage)
+      this.messages.unshift(dequeuedMessage)
+    }
+  }
+
   /**
    *
    */
@@ -274,78 +351,17 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     ) {
       const dequeuedMessage = this.messages.shift()!
 
-      // Clone the message
-      const clonedMessage = Message.from(dequeuedMessage.message)
-
       // Add to our counter of messages in transit
       this.messagesInTransit += 1
 
-      dQueue(
-        `Routing message`,
-        dequeuedMessage,
-        dequeuedMessage.message,
-        dequeuedMessage.message.payload,
-      )
-      dQueue(
-        `- Queue length: ${this.messages.length}, messages in transit: ${this.messagesInTransit}`,
-      )
-
-      this.device
-        .messageRouter!.route(clonedMessage)
-        .then((val) => {
-          // call all the resolvers
-          for (const resolve of dequeuedMessage.resolves) {
-            resolve(val)
-          }
-        })
-        .catch((err: Error) => {
-          // Set the trace
-          err.stack = `${err.stack ?? ''} Caused by ${dequeuedMessage.trace}`
-
-          // Increment the ackNum if it's an ack message on our copy of it
-          if (dequeuedMessage.message.metadata.ack) {
-            dequeuedMessage.message.metadata.ackNum += 1
-          }
-
-          // increment the retry counter
-          dequeuedMessage.retries += 1
-
-          // If it's a one shot message, don't do any retries
-          if (
-            this.oneShotMessageIDs.includes(dequeuedMessage.message.messageID)
-          ) {
-            for (const reject of dequeuedMessage.rejections) {
-              reject(err)
-            }
-
-            return
-          }
-
-          // If it's exceeded the max ack number, fail it out
-          if (dequeuedMessage.message.metadata.ackNum > MAX_ACK_NUM) {
-            for (const reject of dequeuedMessage.rejections) {
-              reject(err)
-            }
-
-            return
-          }
-
-          // If it's exceeded the max retry number, fail it out
-          if (dequeuedMessage.retries > this.retries) {
-            for (const reject of dequeuedMessage.rejections) {
-              reject(err)
-            }
-
-            return
-          }
-
-          // add it back to the queue and try again if we have retries left
-          // console.log('retrying message', dequeuedMessage)
-          this.messages.unshift(dequeuedMessage)
-        })
-        .finally(() => {
+      this.routeMessage(dequeuedMessage)
+        .then(() => {
           // A message is no longer in transit, reduce the count
           this.messagesInTransit -= 1
+        })
+        .catch((err) => {
+          console.warn('Error in FIFO Queue routing')
+          throw err
         })
     }
   }
