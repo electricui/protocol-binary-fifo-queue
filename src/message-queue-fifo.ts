@@ -359,7 +359,7 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
           // A message is no longer in transit, reduce the count
           this.messagesInTransit -= 1
         })
-        .catch((err) => {
+        .catch(err => {
           console.warn('Error in FIFO Queue routing')
           throw err
         })
