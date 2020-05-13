@@ -219,9 +219,9 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
 
   clearQueue() {
     for (const msg of this.messages) {
-      for (const resolve of msg.resolves) {
+      for (const reject of msg.rejections) {
         // Reject all promises with a disconnection message
-        resolve(Promise.reject(new Error('Clearing Message Queue')))
+        reject(new Error('Clearing Message Queue'))
       }
     }
     this.messages = []
