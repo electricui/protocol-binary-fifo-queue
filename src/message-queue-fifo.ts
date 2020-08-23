@@ -1,7 +1,9 @@
 import {} from '@electricui/build-rollup-config'
 
 import {
+  CancellationToken,
   DEVICE_EVENTS,
+  Deferred,
   Device,
   Message,
   MessageQueue,
@@ -13,36 +15,26 @@ import debug from 'debug'
 
 const dQueue = debug('electricui-protocol-binary-fifo-queue:queue')
 
-type Resolver = (value: any) => void
-
 class QueuedMessage {
   message: Message
-  resolves: Array<Resolver>
-  rejections: Array<Resolver>
+  deferreds: Array<Deferred<Message>>
   retries: number = 0
-  trace: string | undefined
+  cancellationToken: CancellationToken
 
   constructor(
     message: Message,
-    resolve: Resolver,
-    reject: Resolver,
-    trace: string | undefined,
+    deferred: Deferred<Message>,
+    cancellationToken: CancellationToken,
   ) {
     this.message = message
-    this.resolves = [resolve]
-    this.rejections = [reject]
-    this.trace = trace
+    this.deferreds = [deferred]
+    this.cancellationToken = cancellationToken
 
-    this.addResolve = this.addResolve.bind(this)
-    this.addReject = this.addReject.bind(this)
+    this.addDeferred = this.addDeferred.bind(this)
   }
 
-  addResolve(resolve: Resolver) {
-    this.resolves.push(resolve)
-  }
-
-  addReject(reject: Resolver) {
-    this.rejections.push(reject)
+  addDeferred(deferred: Deferred<Message>) {
+    this.deferreds.push(deferred)
   }
 }
 
@@ -104,125 +96,118 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     options.device.on(DEVICE_EVENTS.DISCONNECTION, this.onDisconnect)
   }
 
-  queue(message: Message): PipelinePromise {
+  queue(
+    message: Message,
+    cancellationToken: CancellationToken,
+  ): PipelinePromise {
     if (this.device.messageRouter === null) {
       throw new Error('The device needs a messageRouter set')
     }
 
     dQueue(`Queuing message`, message.messageID)
 
-    let stackTrace: string | undefined
-    if (__DEV__) {
-      stackTrace = new Error().stack
-    }
+    const deferred = new Deferred<Message>()
 
     // Return a promise that will resolve with the promise of the write, when it writes
-    return new Promise((resolve, reject) => {
-      // check if this message is on the list of non-idempotent messageIDs
-      if (!this.nonIdempotentMessageIDs.includes(message.messageID)) {
-        // iterate over all the messages in the queue
-        for (const [index, inQueue] of this.messages.entries()) {
-          // check if it has the same messageID, if not, next message
-          if (inQueue.message.messageID !== message.messageID) {
-            continue
-          }
-
-          // if they're namespaced internal / developer differently, continue
-          if (inQueue.message.metadata.internal !== message.metadata.internal) {
-            continue
-          }
-
-          // if the types are different, continue
-          if (inQueue.message.metadata.type !== message.metadata.type) {
-            continue
-          }
-
-          // if inQueue has an offset that's different to this offset, continue
-          if (inQueue.message.metadata.offset !== message.metadata.offset) {
-            continue
-          }
-
-          // if inQueue has an ackNum that's different to this ackNum, continue
-          if (inQueue.message.metadata.ackNum !== message.metadata.ackNum) {
-            continue
-          }
-
-          // if one has an ack and one doesn't, we CAN deduplicate
-          // we go 'true' unless both are false
-          const ack = inQueue.message.metadata.ack || message.metadata.ack
-
-          // if one is a query and one isn't a query, we CAN deduplicate
-          const query = inQueue.message.metadata.query || message.metadata.query
-
-          // build the payload
-          let payload = null
-
-          // if the old message isn't null, we override with that
-          if (inQueue.message.payload !== null) {
-            dQueue(
-              'Deduplicating message in queue',
-              "Old message's payload isn't null, overwriting with that payload",
-              inQueue.message.payload,
-            )
-            payload = inQueue.message.payload
-          }
-
-          // if the new message isn't null, we then override with that
-          if (message.payload !== null) {
-            dQueue(
-              'Deduplicating message in queue',
-              "New message's payload isn't null, overwriting with that payload",
-              message.payload,
-            )
-            payload = message.payload
-          }
-
-          // deduplicate this message
-          inQueue.addResolve(resolve)
-          inQueue.addReject(reject)
-
-          // mutate the things we could have changed
-          this.messages[index].message.metadata.ack = ack
-          this.messages[index].message.metadata.query = query
-          this.messages[index].message.payload = payload
-
-          dQueue(
-            `deduplicating message`,
-            message,
-            'with',
-            this.messages[index].message,
-          )
-          this.tick()
-          return
+    // check if this message is on the list of non-idempotent messageIDs
+    if (!this.nonIdempotentMessageIDs.includes(message.messageID)) {
+      // iterate over all the messages in the queue
+      for (const [index, inQueue] of this.messages.entries()) {
+        // check if it has the same messageID, if not, next message
+        if (inQueue.message.messageID !== message.messageID) {
+          continue
         }
-      } else {
-        dQueue(`message is non idempotent`, message.messageID)
+
+        // if they're namespaced internal / developer differently, continue
+        if (inQueue.message.metadata.internal !== message.metadata.internal) {
+          continue
+        }
+
+        // if the types are different, continue
+        if (inQueue.message.metadata.type !== message.metadata.type) {
+          continue
+        }
+
+        // if inQueue has an offset that's different to this offset, continue
+        if (inQueue.message.metadata.offset !== message.metadata.offset) {
+          continue
+        }
+
+        // if inQueue has an ackNum that's different to this ackNum, continue
+        if (inQueue.message.metadata.ackNum !== message.metadata.ackNum) {
+          continue
+        }
+
+        // if one has an ack and one doesn't, we CAN deduplicate
+        // we go 'true' unless both are false
+        const ack = inQueue.message.metadata.ack || message.metadata.ack
+
+        // if one is a query and one isn't a query, we CAN deduplicate
+        const query = inQueue.message.metadata.query || message.metadata.query
+
+        // build the payload
+        let payload = null
+
+        // if the old message isn't null, we override with that
+        if (inQueue.message.payload !== null) {
+          dQueue(
+            'Deduplicating message in queue',
+            "Old message's payload isn't null, overwriting with that payload",
+            inQueue.message.payload,
+          )
+          payload = inQueue.message.payload
+        }
+
+        // if the new message isn't null, we then override with that
+        if (message.payload !== null) {
+          dQueue(
+            'Deduplicating message in queue',
+            "New message's payload isn't null, overwriting with that payload",
+            message.payload,
+          )
+          payload = message.payload
+        }
+
+        // deduplicate this message
+        inQueue.addDeferred(deferred)
+
+        // mutate the things we could have changed
+        this.messages[index].message.metadata.ack = ack
+        this.messages[index].message.metadata.query = query
+        this.messages[index].message.payload = payload
+
+        dQueue(
+          `deduplicating message`,
+          message,
+          'with',
+          this.messages[index].message,
+        )
+        this.tick()
+        return deferred.promise
       }
+    } else {
+      dQueue(`message is non idempotent`, message.messageID)
+    }
 
-      // this message isn't goign to be deduplicated
+    // this message isn't goign to be deduplicated
 
-      const queuedMessage = new QueuedMessage(
-        message,
-        resolve,
-        reject,
-        stackTrace,
-      )
+    const queuedMessage = new QueuedMessage(
+      message,
+      deferred,
+      cancellationToken,
+    )
 
-      this.messages.push(queuedMessage)
+    this.messages.push(queuedMessage)
 
-      dQueue(`New message`, message.messageID)
+    dQueue(`New message`, message.messageID)
 
-      this.tick()
-      return
-    })
+    this.tick()
+    return deferred.promise
   }
 
   clearQueue() {
     for (const msg of this.messages) {
-      for (const reject of msg.rejections) {
-        // Reject all promises with a disconnection message
-        reject(new Error('Clearing Message Queue'))
-      }
+      msg.cancellationToken.cancel()
     }
     this.messages = []
     this.messagesInTransit = 0
@@ -272,18 +257,15 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     )
 
     try {
-      const val = await this.device.messageRouter!.route(clonedMessage)
+      const val = await this.device.messageRouter!.route(
+        clonedMessage,
+        dequeuedMessage.cancellationToken,
+      )
 
-      for (const resolve of dequeuedMessage.resolves) {
-        resolve(val)
+      for (const deferred of dequeuedMessage.deferreds) {
+        deferred.resolve(val)
       }
     } catch (err) {
-      const stackTrace = dequeuedMessage.trace
-      // Transfer the stack if it exists
-      if (stackTrace) {
-        err.stack = `${err.stack ?? ''} Caused by ${stackTrace}`
-      }
-
       // Increment the ackNum if it's an ack message on our copy of it
       if (dequeuedMessage.message.metadata.ack) {
         dequeuedMessage.message.metadata.ackNum += 1
@@ -292,28 +274,18 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
       // increment the retry counter
       dequeuedMessage.retries += 1
 
-      // If it's a one shot message, don't do any retries
-      if (this.oneShotMessageIDs.includes(dequeuedMessage.message.messageID)) {
-        for (const reject of dequeuedMessage.rejections) {
-          reject(err)
-        }
-
-        return
-      }
-
-      // If it's exceeded the max ack number, fail it out
-      if (dequeuedMessage.message.metadata.ackNum > MAX_ACK_NUM) {
-        for (const reject of dequeuedMessage.rejections) {
-          reject(err)
-        }
-
-        return
-      }
-
-      // If it's exceeded the max retry number, fail it out
-      if (dequeuedMessage.retries > this.retries) {
-        for (const reject of dequeuedMessage.rejections) {
-          reject(err)
+      if (
+        // If it's a one shot message, don't do any retries
+        this.oneShotMessageIDs.includes(dequeuedMessage.message.messageID) ||
+        // If it's exceeded the max ack number, fail it out
+        dequeuedMessage.message.metadata.ackNum > MAX_ACK_NUM ||
+        // If it's exceeded the max retry number, fail it out
+        dequeuedMessage.retries > this.retries ||
+        // If this was a cancellation, reject up the chain
+        dequeuedMessage.cancellationToken.caused(err)
+      ) {
+        for (const deferred of dequeuedMessage.deferreds) {
+          deferred.reject(err)
         }
 
         return
