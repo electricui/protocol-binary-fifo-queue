@@ -103,6 +103,11 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     if (this.device.messageRouter === null) {
       throw new Error('The device needs a messageRouter set')
     }
+    if (!cancellationToken) {
+      throw new Error(
+        `Message ${message.messageID} was queued without a CancellationToken`,
+      )
+    }
 
     dQueue(`Queuing message`, message.messageID)
 
