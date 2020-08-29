@@ -185,6 +185,7 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
           this.messages[index].message,
         )
         this.tick()
+
         return deferred.promise
       }
     } else {
