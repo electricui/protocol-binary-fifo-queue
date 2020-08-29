@@ -100,9 +100,6 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     message: Message,
     cancellationToken: CancellationToken,
   ): PipelinePromise {
-    if (this.device.messageRouter === null) {
-      throw new Error('The device needs a messageRouter set')
-    }
     if (!cancellationToken) {
       throw new Error(
         `Message ${message.messageID} was queued without a CancellationToken`,
@@ -243,7 +240,7 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
   }
 
   canRoute() {
-    return this.device.messageRouter!.canRoute()
+    return this.device.canRoute()
   }
 
   async routeMessage(dequeuedMessage: QueuedMessage) {
@@ -262,7 +259,7 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     )
 
     try {
-      const val = await this.device.messageRouter!.route(
+      const val = await this.device.route(
         clonedMessage,
         dequeuedMessage.cancellationToken,
       )
