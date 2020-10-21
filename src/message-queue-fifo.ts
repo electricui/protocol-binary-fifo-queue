@@ -81,6 +81,7 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     this.onConnect = this.onConnect.bind(this)
     this.onDisconnect = this.onDisconnect.bind(this)
     this.clearQueue = this.clearQueue.bind(this)
+    this.decrementMessagesInTransit = this.decrementMessagesInTransit.bind(this)
     this.tick = this.tick.bind(this)
 
     this.interval = options.interval || 50
@@ -300,6 +301,10 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     }
   }
 
+  decrementMessagesInTransit() {
+    this.messagesInTransit -= 1
+  }
+
   /**
    *
    */
@@ -330,10 +335,7 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
       this.messagesInTransit += 1
 
       this.routeMessage(dequeuedMessage)
-        .then(() => {
-          // A message is no longer in transit, reduce the count
-          this.messagesInTransit -= 1
-        })
+        .then(this.decrementMessagesInTransit)
         .catch(err => {
           console.warn('Error in FIFO Queue routing')
           throw err
