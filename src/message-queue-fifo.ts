@@ -21,11 +21,7 @@ class QueuedMessage {
   retries: number = 0
   cancellationToken: CancellationToken
 
-  constructor(
-    message: Message,
-    deferred: Deferred<Message>,
-    cancellationToken: CancellationToken,
-  ) {
+  constructor(message: Message, deferred: Deferred<Message>, cancellationToken: CancellationToken) {
     this.message = message
     this.deferreds = [deferred]
     this.cancellationToken = cancellationToken
@@ -97,14 +93,9 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     options.device.on(DEVICE_EVENTS.DISCONNECTION, this.onDisconnect)
   }
 
-  queue(
-    message: Message,
-    cancellationToken: CancellationToken,
-  ): PipelinePromise {
+  queue(message: Message, cancellationToken: CancellationToken): PipelinePromise {
     if (!cancellationToken) {
-      throw new Error(
-        `Message ${message.messageID} was queued without a CancellationToken`,
-      )
+      throw new Error(`Message ${message.messageID} was queued without a CancellationToken`)
     }
 
     dQueue(`Queuing message`, message.messageID)
@@ -179,12 +170,7 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
         this.messages[index].message.metadata.query = query
         this.messages[index].message.payload = payload
 
-        dQueue(
-          `deduplicating message`,
-          message,
-          'with',
-          this.messages[index].message,
-        )
+        dQueue(`deduplicating message`, message, 'with', this.messages[index].message)
         this.tick()
 
         return deferred.promise
@@ -193,13 +179,9 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
       dQueue(`message is non idempotent`, message.messageID)
     }
 
-    // this message isn't goign to be deduplicated
+    // this message isn't going to be deduplicated
 
-    const queuedMessage = new QueuedMessage(
-      message,
-      deferred,
-      cancellationToken,
-    )
+    const queuedMessage = new QueuedMessage(message, deferred, cancellationToken)
 
     this.messages.push(queuedMessage)
 
@@ -249,22 +231,12 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     // Clone the message
     const clonedMessage = Message.from(dequeuedMessage.message)
 
-    dQueue(
-      `Routing message`,
-      dequeuedMessage,
-      dequeuedMessage.message,
-      dequeuedMessage.message.payload,
-    )
+    dQueue(`Routing message`, dequeuedMessage, dequeuedMessage.message, dequeuedMessage.message.payload)
 
-    dQueue(
-      `- Queue length: ${this.messages.length}, messages in transit: ${this.messagesInTransit}`,
-    )
+    dQueue(`- Queue length: ${this.messages.length}, messages in transit: ${this.messagesInTransit}`)
 
     try {
-      const val = await this.device.route(
-        clonedMessage,
-        dequeuedMessage.cancellationToken,
-      )
+      const val = await this.device.route(clonedMessage, dequeuedMessage.cancellationToken)
 
       for (const deferred of dequeuedMessage.deferreds) {
         deferred.resolve(val)
@@ -314,9 +286,7 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
       return
     }
 
-    dQueue(
-      `Tick Start - Queue length: ${this.messages.length}, messages in transit: ${this.messagesInTransit}`,
-    )
+    dQueue(`Tick Start - Queue length: ${this.messages.length}, messages in transit: ${this.messagesInTransit}`)
 
     if (!this.canRoute()) {
       dQueue(`Message router reporting that it can't route`)
@@ -324,11 +294,7 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     }
 
     // Repeat as long as we have quota for our outgoing messages
-    while (
-      this.canRoute() &&
-      this.messages.length > 0 &&
-      this.messagesInTransit < this.concurrentMessages
-    ) {
+    while (this.canRoute() && this.messages.length > 0 && this.messagesInTransit < this.concurrentMessages) {
       const dequeuedMessage = this.messages.shift()!
 
       // Add to our counter of messages in transit
