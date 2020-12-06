@@ -2,20 +2,21 @@ import 'mocha'
 
 import * as chai from 'chai'
 import * as sinon from 'sinon'
-import { EventEmitter } from 'events'
-import {
-  Device,
-  DEVICE_EVENTS,
-  MessageRouterTestCallback,
-  Message,
-  PipelinePromise,
-  MessageRouter,
-} from '@electricui/core'
 
 import {
-  MessageQueueBinaryFIFO,
-  MessageQueueBinaryFIFOOptions,
-} from '../src/message-queue-fifo'
+  CONNECTION_EVENTS,
+  CONNECTION_STATE,
+  CancellationToken,
+  DEVICE_EVENTS,
+  Device,
+  Message,
+  MessageRouter,
+  MessageRouterTestCallback,
+  PipelinePromise,
+} from '@electricui/core'
+import { MessageQueueBinaryFIFO, MessageQueueBinaryFIFOOptions } from '../src/message-queue-fifo'
+
+import { EventEmitter } from 'events'
 
 const assert = chai.assert
 
@@ -33,32 +34,29 @@ class MockDevice extends EventEmitter {
 
   constructor(callback: (message: Message) => PipelinePromise) {
     super()
-    this.messageRouter = new MessageRouterTestCallback(
-      (this as unknown) as Device,
-      callback,
-    )
+    this.messageRouter = new MessageRouterTestCallback((this as unknown) as Device, callback)
   }
 
   connect = () => {
     this.isConnected = true
-    this.emit(DEVICE_EVENTS.CONNECTION)
+    this.emit(DEVICE_EVENTS.AGGREGATE_CONNECTION_STATE_CHANGE, this, CONNECTION_STATE.CONNECTING)
+    this.emit(DEVICE_EVENTS.AGGREGATE_CONNECTION_STATE_CHANGE, this, CONNECTION_STATE.CONNECTED)
   }
 
   disconnect = () => {
     this.isConnected = false
-    this.emit(DEVICE_EVENTS.DISCONNECTION)
+    this.emit(DEVICE_EVENTS.AGGREGATE_CONNECTION_STATE_CHANGE, this, CONNECTION_STATE.DISCONNECTING)
+    this.emit(DEVICE_EVENTS.AGGREGATE_CONNECTION_STATE_CHANGE, this, CONNECTION_STATE.DISCONNECTED)
   }
 
-  write = (message: Message) => {
-    return this.messageQueue!.queue(message).catch(err => {
+  write = (message: Message, cancellationToken: CancellationToken) => {
+    return this.messageQueue!.queue(message, cancellationToken).catch(err => {
       // console.log(err)
     })
   }
 }
 
-function createQueueTestFixtures(
-  options: Omit<MessageQueueBinaryFIFOOptions, 'device'>,
-) {
+function createQueueTestFixtures(options: Omit<MessageQueueBinaryFIFOOptions, 'device'>) {
   const spy = sinon.spy()
   const callback = (message: Message) => {
     // process this 'next tick'
@@ -100,11 +98,11 @@ describe('MessageQueueBinaryFIFO', () => {
 
     device.connect()
     // console.log(spy.callCount, queue.messages.length, queue.messagesInTransit)
-    device.write(new Message('a', 4))
+    device.write(new Message('a', 4), new CancellationToken())
     // console.log(spy.callCount, queue.messages.length, queue.messagesInTransit)
-    device.write(new Message('b', 4))
+    device.write(new Message('b', 4), new CancellationToken())
     // console.log(spy.callCount, queue.messages.length, queue.messagesInTransit)
-    device.write(new Message('c', 4))
+    device.write(new Message('c', 4), new CancellationToken())
     // console.log(spy.callCount, queue.messages.length, queue.messagesInTransit)
 
     assert.deepEqual(spy.callCount, 0, 'We should have receive 0 messages') // prettier-ignore
@@ -125,11 +123,11 @@ describe('MessageQueueBinaryFIFO', () => {
 
     device.connect()
     // console.log(spy.callCount, queue.messages.length, queue.messagesInTransit)
-    device.write(new Message('a', 4))
+    device.write(new Message('a', 4), new CancellationToken())
     // console.log(spy.callCount, queue.messages.length, queue.messagesInTransit)
-    device.write(new Message('b', 4))
+    device.write(new Message('b', 4), new CancellationToken())
     // console.log(spy.callCount, queue.messages.length, queue.messagesInTransit)
-    device.write(new Message('c', 4))
+    device.write(new Message('c', 4), new CancellationToken())
     // console.log(spy.callCount, queue.messages.length, queue.messagesInTransit)
 
     // Before any ticks, there should be 3 in the queue
@@ -168,33 +166,25 @@ describe('MessageQueueBinaryFIFO', () => {
       concurrentMessages: 5,
     })
 
-    device.write(new Message('a', 4))
+    device.write(new Message('a', 4), new CancellationToken())
     // console.log('connecting')
     device.connect()
     // console.log('connected, this clears the queue')
-    device.write(new Message('b', 4))
-    device.write(new Message('c', 4))
+    device.write(new Message('b', 4), new CancellationToken())
+    device.write(new Message('c', 4), new CancellationToken())
 
-    device.write(new Message('d', 4))
-    device.write(new Message('e', 4))
+    device.write(new Message('d', 4), new CancellationToken())
+    device.write(new Message('e', 4), new CancellationToken())
 
     device.disconnect()
-    device.write(new Message('f', 4))
+    device.write(new Message('f', 4), new CancellationToken())
 
     // let the promises fulfil
     await delay(10)
 
     assert.deepEqual(spy.callCount, 4, 'We should have receive 4 messages') // should have been called 4 times
-    assert.deepEqual(
-      queue.messages.length,
-      1,
-      'There should be one message left in the queue at the end',
-    ) // there should be one message left in the queue
-    assert.deepEqual(
-      queue.messagesInTransit,
-      0,
-      'The messages in transit should be 0',
-    ) // and zero in transit
+    assert.deepEqual(queue.messages.length, 1, 'There should be one message left in the queue at the end') // there should be one message left in the queue
+    assert.deepEqual(queue.messagesInTransit, 0, 'The messages in transit should be 0') // and zero in transit
 
     assert.deepEqual((spy.getCall(0).args[0] as Message).messageID, 'b')
     assert.deepEqual((spy.getCall(1).args[0] as Message).messageID, 'c')
@@ -208,9 +198,9 @@ describe('MessageQueueBinaryFIFO', () => {
     })
 
     device.connect()
-    device.write(new Message('a', 1))
-    device.write(new Message('a', 2))
-    device.write(new Message('a', 3))
+    device.write(new Message('a', 1), new CancellationToken())
+    device.write(new Message('a', 2), new CancellationToken())
+    device.write(new Message('a', 3), new CancellationToken())
 
     queue.concurrentMessages = 100
     queue.tick()
@@ -231,10 +221,10 @@ describe('MessageQueueBinaryFIFO', () => {
     })
 
     device.connect()
-    device.write(new Message('a', 1))
-    device.write(new Message('b', 2))
-    device.write(new Message('a', 3))
-    device.write(new Message('b', 4))
+    device.write(new Message('a', 1), new CancellationToken())
+    device.write(new Message('b', 2), new CancellationToken())
+    device.write(new Message('a', 3), new CancellationToken())
+    device.write(new Message('b', 4), new CancellationToken())
 
     queue.concurrentMessages = 100
     queue.tick()
@@ -261,8 +251,8 @@ describe('MessageQueueBinaryFIFO', () => {
     queryWriteMessage.metadata.query = true
 
     device.connect()
-    device.write(queryWriteMessage)
-    device.write(new Message('a', 3))
+    device.write(queryWriteMessage, new CancellationToken())
+    device.write(new Message('a', 3), new CancellationToken())
 
     queue.concurrentMessages = 100
     queue.tick()
@@ -287,8 +277,8 @@ describe('MessageQueueBinaryFIFO', () => {
     queryWriteMessage.metadata.query = true
 
     device.connect()
-    device.write(new Message('a', 3))
-    device.write(queryWriteMessage)
+    device.write(new Message('a', 3), new CancellationToken())
+    device.write(queryWriteMessage, new CancellationToken())
 
     queue.concurrentMessages = 100
     queue.tick()
@@ -313,8 +303,8 @@ describe('MessageQueueBinaryFIFO', () => {
     queryWriteMessage.metadata.query = true
 
     device.connect()
-    device.write(queryWriteMessage)
-    device.write(queryWriteMessage)
+    device.write(queryWriteMessage, new CancellationToken())
+    device.write(queryWriteMessage, new CancellationToken())
 
     queue.concurrentMessages = 100
     queue.tick()
@@ -344,10 +334,10 @@ describe('MessageQueueBinaryFIFO', () => {
     queryWriteMessage2.metadata.offset = 100
 
     device.connect()
-    device.write(queryWriteMessage1)
-    device.write(new Message('b', 2))
-    device.write(queryWriteMessage2)
-    device.write(new Message('b', 4))
+    device.write(queryWriteMessage1, new CancellationToken())
+    device.write(new Message('b', 2), new CancellationToken())
+    device.write(queryWriteMessage2, new CancellationToken())
+    device.write(new Message('b', 4), new CancellationToken())
 
     queue.concurrentMessages = 100
     queue.tick()
@@ -377,10 +367,10 @@ describe('MessageQueueBinaryFIFO', () => {
     })
 
     device.connect()
-    device.write(new Message('a', 1))
-    device.write(new Message('a', 2))
-    device.write(new Message('b', 1))
-    device.write(new Message('b', 2))
+    device.write(new Message('a', 1), new CancellationToken())
+    device.write(new Message('a', 2), new CancellationToken())
+    device.write(new Message('b', 1), new CancellationToken())
+    device.write(new Message('b', 2), new CancellationToken())
 
     queue.concurrentMessages = 100
     queue.tick()
@@ -414,8 +404,8 @@ describe('MessageQueueBinaryFIFO', () => {
     queryWriteMessage2.metadata.query = true
 
     device.connect()
-    device.write(queryWriteMessage1)
-    device.write(queryWriteMessage2)
+    device.write(queryWriteMessage1, new CancellationToken())
+    device.write(queryWriteMessage2, new CancellationToken())
 
     queue.concurrentMessages = 100
     queue.tick()

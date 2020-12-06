@@ -1,6 +1,7 @@
 import {} from '@electricui/build-rollup-config'
 
 import {
+  CONNECTION_STATE,
   CancellationToken,
   DEVICE_EVENTS,
   Deferred,
@@ -74,8 +75,9 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     this.canRoute = this.canRoute.bind(this)
     this.routeMessage = this.routeMessage.bind(this)
 
-    this.onConnect = this.onConnect.bind(this)
-    this.onDisconnect = this.onDisconnect.bind(this)
+    this.deviceConnectionChange = this.deviceConnectionChange.bind(this)
+    this.startup = this.startup.bind(this)
+    this.teardown = this.teardown.bind(this)
     this.clearQueue = this.clearQueue.bind(this)
     this.decrementMessagesInTransit = this.decrementMessagesInTransit.bind(this)
     this.tick = this.tick.bind(this)
@@ -89,8 +91,7 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     this.oneShotMessageIDs = options.oneShotMessageIDs ?? []
 
     // Get notified when the device disconnects from everything
-    options.device.on(DEVICE_EVENTS.CONNECTION, this.onConnect)
-    options.device.on(DEVICE_EVENTS.DISCONNECTION, this.onDisconnect)
+    options.device.on(DEVICE_EVENTS.AGGREGATE_CONNECTION_STATE_CHANGE, this.deviceConnectionChange)
   }
 
   queue(message: Message, cancellationToken: CancellationToken): PipelinePromise {
@@ -199,7 +200,19 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     this.messagesInTransit = 0
   }
 
-  onConnect() {
+  deviceConnectionChange(device: Device, state: CONNECTION_STATE) {
+    if (state === CONNECTION_STATE.CONNECTING) {
+      this.startup()
+      return
+    }
+
+    if (state === CONNECTION_STATE.DISCONNECTING) {
+      this.teardown()
+      return
+    }
+  }
+
+  startup() {
     this.intervalReference = setInterval(this.tick, this.interval)
 
     dQueue(`Spinning up queue loop`)
@@ -210,7 +223,7 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     dQueue(`Device connected, queue setup complete`)
   }
 
-  onDisconnect() {
+  teardown() {
     if (this.intervalReference) {
       clearInterval(this.intervalReference)
     }
