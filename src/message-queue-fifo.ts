@@ -1,15 +1,8 @@
 import {} from '@electricui/build-rollup-config'
 
-import {
-  CONNECTION_STATE,
-  CancellationToken,
-  DEVICE_EVENTS,
-  Deferred,
-  Device,
-  Message,
-  MessageQueue,
-  PipelinePromise,
-} from '@electricui/core'
+import { CancellationToken, Deferred } from '@electricui/async-utilities'
+
+import { CONNECTION_STATE, DEVICE_EVENTS, Device, Message, MessageQueue, PipelinePromise } from '@electricui/core'
 
 import { MAX_ACK_NUM } from '@electricui/protocol-binary-constants'
 import debug from 'debug'
@@ -18,11 +11,11 @@ const dQueue = debug('electricui-protocol-binary-fifo-queue:queue')
 
 class QueuedMessage {
   message: Message
-  deferreds: Array<Deferred<Message>>
+  deferreds: Array<Deferred<void>>
   retries: number = 0
   cancellationToken: CancellationToken
 
-  constructor(message: Message, deferred: Deferred<Message>, cancellationToken: CancellationToken) {
+  constructor(message: Message, deferred: Deferred<void>, cancellationToken: CancellationToken) {
     this.message = message
     this.deferreds = [deferred]
     this.cancellationToken = cancellationToken
@@ -30,7 +23,7 @@ class QueuedMessage {
     this.addDeferred = this.addDeferred.bind(this)
   }
 
-  addDeferred(deferred: Deferred<Message>) {
+  addDeferred(deferred: Deferred<void>) {
     this.deferreds.push(deferred)
   }
 }
@@ -101,7 +94,7 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
 
     dQueue(`Queuing message`, message.messageID)
 
-    const deferred = new Deferred<Message>()
+    const deferred = new Deferred<void>()
 
     // Return a promise that will resolve with the promise of the write, when it writes
     // check if this message is on the list of non-idempotent messageIDs
@@ -249,10 +242,10 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     dQueue(`- Queue length: ${this.messages.length}, messages in transit: ${this.messagesInTransit}`)
 
     try {
-      const val = await this.device.route(clonedMessage, dequeuedMessage.cancellationToken)
+      await this.device.route(clonedMessage, dequeuedMessage.cancellationToken)
 
       for (const deferred of dequeuedMessage.deferreds) {
-        deferred.resolve(val)
+        deferred.resolve()
       }
     } catch (err) {
       // Increment the ackNum if it's an ack message on our copy of it
