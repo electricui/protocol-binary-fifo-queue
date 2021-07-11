@@ -50,7 +50,7 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
   concurrentMessages: number
   intervalReference: NodeJS.Timer | null = null
   interval: number
-  messagesInTransit: number = 0
+  messagesInTransit: Set<QueuedMessage> = new Set()
   retries: number
   nonIdempotentMessageIDs: Array<string>
   oneShotMessageIDs: Array<string>
@@ -58,7 +58,10 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
   constructor(options: MessageQueueBinaryFIFOOptions) {
     super(options.device)
 
-    // 0 is an 'acceptable' number for testing, so explicitly check for undefined
+    if (options.concurrentMessages === 0) {
+      throw new Error("Can't create a FIFO queue with a maximum of 0 concurrent messages")
+    }
+
     if (typeof options.concurrentMessages === 'undefined') {
       this.concurrentMessages = 100
     } else {
@@ -71,8 +74,9 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     this.deviceConnectionChange = this.deviceConnectionChange.bind(this)
     this.startup = this.startup.bind(this)
     this.teardown = this.teardown.bind(this)
+    this._pause = this._pause.bind(this)
+    this._resume = this._resume.bind(this)
     this.clearQueue = this.clearQueue.bind(this)
-    this.decrementMessagesInTransit = this.decrementMessagesInTransit.bind(this)
     this.tick = this.tick.bind(this)
 
     this.interval = options.interval || 50
@@ -175,7 +179,12 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
 
     // this message isn't going to be deduplicated
 
-    const queuedMessage = new QueuedMessage(message, deferred, cancellationToken)
+    // Copy the cancellation token since we can't cancel the upper one on disconnection,
+    // since we don't own it
+    const queuedCancellationToken = new CancellationToken()
+    cancellationToken.subscribe(queuedCancellationToken.cancel)
+
+    const queuedMessage = new QueuedMessage(message, deferred, queuedCancellationToken)
 
     this.messages.push(queuedMessage)
 
@@ -186,11 +195,19 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
   }
 
   clearQueue() {
-    for (const msg of this.messages) {
-      msg.cancellationToken.cancel()
+    // Cancel any outgoing messageIDs
+    for (let index = 0; index < this.messages.length; index++) {
+      const message = this.messages[index]
+      message.cancellationToken.cancel()
     }
-    this.messages = []
-    this.messagesInTransit = 0
+
+    // Cancel any messages in flight
+    for (const message of this.messagesInTransit) {
+      message.cancellationToken.cancel()
+    }
+
+    this.messages.length = 0
+    this.messagesInTransit.clear()
   }
 
   deviceConnectionChange(device: Device, state: CONNECTION_STATE) {
@@ -206,6 +223,9 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
   }
 
   startup() {
+    if (this.intervalReference) {
+      clearInterval(this.intervalReference)
+    }
     this.intervalReference = setInterval(this.tick, this.interval)
 
     dQueue(`Spinning up queue loop`)
@@ -219,6 +239,7 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
   teardown() {
     if (this.intervalReference) {
       clearInterval(this.intervalReference)
+      this.intervalReference = null
     }
 
     dQueue(`Spinning down queue loop`)
@@ -239,11 +260,17 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
 
     dQueue(`Routing message`, dequeuedMessage, dequeuedMessage.message, dequeuedMessage.message.payload)
 
-    dQueue(`- Queue length: ${this.messages.length}, messages in transit: ${this.messagesInTransit}`)
+    dQueue(`- Queue length: ${this.messages.length}, messages in transit: ${this.messagesInTransit.size}`)
 
     try {
       await this.device.route(clonedMessage, dequeuedMessage.cancellationToken)
 
+      // If we're running, decrement the messages in transit
+      if (this.intervalReference) {
+        // Reduce the messages in transit
+        this.messagesInTransit.delete(dequeuedMessage)
+      }
+      // Resolve each of the promises
       for (const deferred of dequeuedMessage.deferreds) {
         deferred.resolve()
       }
@@ -274,25 +301,30 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
       }
 
       // add it back to the queue and try again if we have retries left
-      // console.log('retrying message', dequeuedMessage)
       this.messages.unshift(dequeuedMessage)
     }
   }
 
-  decrementMessagesInTransit() {
-    this.messagesInTransit -= 1
+  private paused = false
+
+  public _pause() {
+    this.paused = true
+  }
+
+  public _resume() {
+    this.paused = false
   }
 
   /**
    *
    */
   tick() {
-    if (this.messages.length === 0) {
+    if (this.messages.length === 0 || this.paused) {
       // exit early silently
       return
     }
 
-    dQueue(`Tick Start - Queue length: ${this.messages.length}, messages in transit: ${this.messagesInTransit}`)
+    dQueue(`Tick Start - Queue length: ${this.messages.length}, messages in transit: ${this.messagesInTransit.size}`)
 
     if (!this.canRoute()) {
       dQueue(`Message router reporting that it can't route`)
@@ -300,18 +332,16 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     }
 
     // Repeat as long as we have quota for our outgoing messages
-    while (this.canRoute() && this.messages.length > 0 && this.messagesInTransit < this.concurrentMessages) {
+    while (this.canRoute() && this.messages.length > 0 && this.messagesInTransit.size < this.concurrentMessages) {
       const dequeuedMessage = this.messages.shift()!
 
       // Add to our counter of messages in transit
-      this.messagesInTransit += 1
+      this.messagesInTransit.add(dequeuedMessage)
 
-      this.routeMessage(dequeuedMessage)
-        .then(this.decrementMessagesInTransit)
-        .catch(err => {
-          console.warn('Error in FIFO Queue routing')
-          throw err
-        })
+      this.routeMessage(dequeuedMessage).catch(err => {
+        console.warn('Error in FIFO Queue routing')
+        throw err
+      })
     }
   }
 }
