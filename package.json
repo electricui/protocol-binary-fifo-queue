@@ -32,6 +32,8 @@
   "devDependencies": {
     "@electricui/build-rollup-config": "^0.8.0",
     "@electricui/jest-config": "^0.8.0",
+    "@jest/globals": "^26.6.2",
+    "@sinonjs/fake-timers": "^7.1.2",
     "@types/bluebird": "^3.5.25",
     "@types/chai": "^4.1.7",
     "@types/chai-subset": "^1.3.2",
@@ -39,12 +41,18 @@
     "@types/mocha": "^5.2.6",
     "@types/node": "^14.14.10",
     "@types/sinon": "^7.0.6",
+    "@types/sinonjs__fake-timers": "^6.0.3",
     "chai": "^4.2.0",
     "chai-subset": "^1.6.0",
+    "jest": "^26.6.3",
+    "jest-circus": "^26.6.3",
     "mocha": "^5.2.0",
     "nyc": "^13.3.0",
+    "react": "17.0.1",
+    "react-dom": "17.0.1",
     "rollup": "2.51.2",
     "sinon": "^7.2.3",
+    "ts-jest": "^26.4.4",
     "ts-node": "^9.0.0",
     "tslib": "^2.0.3",
     "typescript": "4.3.2"
@@ -53,7 +61,7 @@
     "prepack": "silversmith prepack",
     "postpack": "silversmith postpack",
     "build": "rm -rf ./lib && rollup -c",
-    "test": "export TS_NODE_COMPILER_OPTIONS='{\"module\": \"commonjs\"}' && mocha --require ts-node/register \"test/**/*.ts\" && export TS_NODE_COMPILER_OPTIONS=\"\"",
-    "coverage": "export TS_NODE_COMPILER_OPTIONS='{\"module\": \"commonjs\"}' && nyc mocha- -require ts-node/register \"test/**/*.ts\" && export TS_NODE_COMPILER_OPTIONS=\"\""
+    "test": "jest",
+    "watch": "jest --watch"
   }
 }
