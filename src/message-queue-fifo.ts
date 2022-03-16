@@ -1,6 +1,6 @@
 import {} from '@electricui/build-rollup-config'
 
-import { CancellationToken, Deferred } from '@electricui/async-utilities'
+import { CancellationToken, Deferred, UnanimousCancellationToken } from '@electricui/async-utilities'
 
 import { CONNECTION_STATE, DEVICE_EVENTS, Device, Message, MessageQueue, PipelinePromise } from '@electricui/core'
 
@@ -11,20 +11,21 @@ const dQueue = debug('electricui-protocol-binary-fifo-queue:queue')
 
 class QueuedMessage {
   message: Message
-  deferreds: Array<Deferred<void>>
+  deferreds: Array<{
+    deferred: Deferred<void>
+    cancellationToken: CancellationToken
+  }> = []
   retries: number = 0
-  cancellationToken: CancellationToken
+  unanimousCancellationToken: UnanimousCancellationToken = new UnanimousCancellationToken()
 
-  constructor(message: Message, deferred: Deferred<void>, cancellationToken: CancellationToken) {
+  constructor(message: Message) {
     this.message = message
-    this.deferreds = [deferred]
-    this.cancellationToken = cancellationToken
-
     this.addDeferred = this.addDeferred.bind(this)
   }
 
-  addDeferred(deferred: Deferred<void>) {
-    this.deferreds.push(deferred)
+  addDeferred(deferred: Deferred<void>, cancellationToken: CancellationToken) {
+    this.deferreds.push({ deferred, cancellationToken })
+    this.unanimousCancellationToken.addToken(cancellationToken)
   }
 }
 
@@ -91,12 +92,12 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     options.device.on(DEVICE_EVENTS.AGGREGATE_CONNECTION_STATE_CHANGE, this.deviceConnectionChange)
   }
 
-  queue(message: Message, cancellationToken: CancellationToken): PipelinePromise {
+  public queue(message: Message, cancellationToken: CancellationToken): PipelinePromise {
     if (!cancellationToken) {
       throw new Error(`Message ${message.messageID} was queued without a CancellationToken`)
     }
 
-    dQueue(`Queuing message`, message.messageID)
+    dQueue(`Queuing message ${message.messageID} with ${this.messages.length} in the queue.`)
 
     const deferred = new Deferred<void>()
 
@@ -161,7 +162,7 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
         }
 
         // deduplicate this message
-        inQueue.addDeferred(deferred)
+        inQueue.addDeferred(deferred, cancellationToken)
 
         // mutate the things we could have changed
         this.messages[index].message.metadata.ack = ack
@@ -181,10 +182,16 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
 
     // Copy the cancellation token since we can't cancel the upper one on disconnection,
     // since we don't own it
-    const queuedCancellationToken = new CancellationToken()
-    cancellationToken.subscribe(queuedCancellationToken.cancel)
 
-    const queuedMessage = new QueuedMessage(message, deferred, queuedCancellationToken)
+    const queuedMessage = new QueuedMessage(message)
+    queuedMessage.addDeferred(deferred, cancellationToken)
+
+    // If the message is cancelled, remove it from the messagesInTransit set
+    queuedMessage.unanimousCancellationToken.getToken().subscribe(() => {
+      console.log(`unanimousCancellationToken cancelled`)
+      this.messagesInTransit.delete(queuedMessage)
+      this.messages = this.messages.filter(msg => msg !== queuedMessage)
+    })
 
     this.messages.push(queuedMessage)
 
@@ -194,20 +201,42 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     return deferred.promise
   }
 
-  clearQueue() {
+  private clearQueue(reason: string) {
     // Cancel any outgoing messageIDs
     for (let index = 0; index < this.messages.length; index++) {
       const message = this.messages[index]
-      message.cancellationToken.cancel()
+
+      // Reject each message with its own cancellation token
+      for (const deferred of message.deferreds) {
+        deferred.deferred.reject(deferred.cancellationToken.token)
+      }
+
+      // Cancel the unanimousCancellationToken
+      message.unanimousCancellationToken.getToken().cancel()
     }
 
     // Cancel any messages in flight
     for (const message of this.messagesInTransit) {
-      message.cancellationToken.cancel()
+      // Reject each message with its own cancellation token
+      for (const deferred of message.deferreds) {
+        deferred.deferred.reject(deferred.cancellationToken.token)
+      }
+
+      // Cancel the unanimousCancellationToken
+      message.unanimousCancellationToken.getToken().cancel()
     }
 
-    this.messages.length = 0
-    this.messagesInTransit.clear()
+    // this should already be 0
+    if (this.messages.length !== 0) {
+      console.error("this.messages isn't empty")
+      this.messages.length = 0
+    }
+
+    // this should already be 0
+    if (this.messagesInTransit.size !== 0) {
+      console.error("messagesInTransit isn't empty")
+      this.messagesInTransit.clear()
+    }
   }
 
   deviceConnectionChange(device: Device, state: CONNECTION_STATE) {
@@ -231,7 +260,7 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     dQueue(`Spinning up queue loop`)
 
     // clear the queue.
-    this.clearQueue()
+    this.clearQueue('connecting')
 
     dQueue(`Device connected, queue setup complete`)
   }
@@ -245,7 +274,7 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     dQueue(`Spinning down queue loop`)
 
     // clear the queue
-    this.clearQueue()
+    this.clearQueue('disconnecting')
 
     dQueue(`Queue teardown complete`)
   }
@@ -263,16 +292,14 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     dQueue(`- Queue length: ${this.messages.length}, messages in transit: ${this.messagesInTransit.size}`)
 
     try {
-      await this.device.route(clonedMessage, dequeuedMessage.cancellationToken)
+      await this.device.route(clonedMessage, dequeuedMessage.unanimousCancellationToken.getToken())
 
-      // If we're running, decrement the messages in transit
-      if (this.intervalReference) {
-        // Reduce the messages in transit
-        this.messagesInTransit.delete(dequeuedMessage)
-      }
+      // Reduce the messages in transit
+      this.messagesInTransit.delete(dequeuedMessage)
+
       // Resolve each of the promises
       for (const deferred of dequeuedMessage.deferreds) {
-        deferred.resolve()
+        deferred.deferred.resolve()
       }
     } catch (err) {
       // Increment the ackNum if it's an ack message on our copy of it
@@ -291,10 +318,10 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
         // If it's exceeded the max retry number, fail it out
         dequeuedMessage.retries > this.retries ||
         // If this was a cancellation, reject up the chain
-        dequeuedMessage.cancellationToken.caused(err)
+        dequeuedMessage.unanimousCancellationToken.getToken().caused(err)
       ) {
         for (const deferred of dequeuedMessage.deferreds) {
-          deferred.reject(err)
+          deferred.deferred.reject(deferred.cancellationToken.token)
         }
 
         return

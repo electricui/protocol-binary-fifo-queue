@@ -170,7 +170,14 @@ describe('MessageQueueBinaryFIFO', () => {
     })
 
     try {
-      device.write(new Message('a', 4), new CancellationToken())
+      const ctA = new CancellationToken()
+      device.write(new Message('a', 4), ctA).catch(err => {
+        if (ctA.caused(err)) {
+          // all good
+        } else {
+          throw err
+        }
+      })
     } catch (e) {
       console.log('a', e)
     }
@@ -179,11 +186,36 @@ describe('MessageQueueBinaryFIFO', () => {
 
     try {
       // console.log('connected, this clears the queue')
-      device.write(new Message('b', 4), new CancellationToken())
-      device.write(new Message('c', 4), new CancellationToken())
+      const ctB = new CancellationToken()
+      device.write(new Message('b', 4), ctB).catch(err => {
+        if (ctB.caused(err)) {
+          // all good
+        } else {
+          throw err
+        }
+      })
+      device.write(new Message('c', 4), ctB).catch(err => {
+        if (ctB.caused(err)) {
+          // all good
+        } else {
+          throw err
+        }
+      })
 
-      device.write(new Message('d', 4), new CancellationToken())
-      device.write(new Message('e', 4), new CancellationToken())
+      device.write(new Message('d', 4), ctB).catch(err => {
+        if (ctB.caused(err)) {
+          // all good
+        } else {
+          throw err
+        }
+      })
+      device.write(new Message('e', 4), ctB).catch(err => {
+        if (ctB.caused(err)) {
+          // all good
+        } else {
+          throw err
+        }
+      })
     } catch (e) {
       console.log('b-d', e)
     }
@@ -192,7 +224,14 @@ describe('MessageQueueBinaryFIFO', () => {
     device.disconnect()
 
     try {
-      device.write(new Message('f', 4), new CancellationToken())
+      const ctC = new CancellationToken()
+      device.write(new Message('f', 4), ctC).catch(err => {
+        if (ctC.caused(err)) {
+          // all good
+        } else {
+          throw err
+        }
+      })
     } catch (e) {}
     // let the promises fulfil
     await delay(100)
@@ -429,6 +468,88 @@ describe('MessageQueueBinaryFIFO', () => {
     expect((spy.getCall(1).args[0] as Message).messageID).toEqual('a')
     expect((spy.getCall(1).args[0] as Message).payload).toEqual(null)
     expect((spy.getCall(1).args[0] as Message).metadata.query).toEqual(true)
+
+    device.disconnect()
+  })
+
+  it('cancelled messages are removed from the queue', async () => {
+    const { spy, queue, device } = createQueueTestFixtures({})
+    queue._pause()
+
+    const queryMessage = new Message('a', null)
+    queryMessage.metadata.query = true
+    device.connect()
+
+    const cancellationToken = new CancellationToken()
+    device.write(queryMessage, cancellationToken)
+
+    expect(queue.messages.length).toBe(1)
+
+    cancellationToken.cancel()
+
+    expect(queue.messages.length).toBe(0)
+
+    queue._resume()
+
+    device.disconnect()
+  })
+
+  it('cancelled messages are removed from the transmission queue', async () => {
+    const { spy, queue, device } = createQueueTestFixtures({})
+    queue._pause()
+
+    const queryMessage = new Message('a', null)
+    queryMessage.metadata.query = true
+    device.connect()
+
+    const cancellationToken = new CancellationToken()
+
+    queue._resume()
+
+    expect(queue.messagesInTransit.size).toBe(0)
+
+    device.write(queryMessage, cancellationToken)
+
+    expect(queue.messagesInTransit.size).toBe(1)
+
+    console.log(queue.messagesInTransit)
+
+    cancellationToken.cancel()
+
+    console.log(queue.messagesInTransit)
+
+    expect(queue.messagesInTransit.size).toBe(0)
+
+    queue._resume()
+
+    device.disconnect()
+  })
+
+  it('deduplicated cancelled messages are only removed from the queue when both are cancelled', async () => {
+    const { spy, queue, device } = createQueueTestFixtures({})
+    queue._pause()
+
+    const queryMessageA = new Message('a', null)
+    queryMessageA.metadata.query = true
+    const queryMessageB = new Message('a', null)
+    queryMessageB.metadata.query = true
+    device.connect()
+
+    const cancellationTokenA = new CancellationToken()
+    device.write(queryMessageA, cancellationTokenA)
+    expect(queue.messages.length).toBe(1)
+
+    const cancellationTokenB = new CancellationToken()
+    device.write(queryMessageB, cancellationTokenB)
+    expect(queue.messages.length).toBe(1)
+
+    cancellationTokenA.cancel()
+    expect(queue.messages.length).toBe(1)
+
+    cancellationTokenB.cancel()
+    expect(queue.messages.length).toBe(0)
+
+    queue._resume()
 
     device.disconnect()
   })
