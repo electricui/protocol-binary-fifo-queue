@@ -512,11 +512,7 @@ describe('MessageQueueBinaryFIFO', () => {
 
     expect(queue.messagesInTransit.size).toBe(1)
 
-    console.log(queue.messagesInTransit)
-
     cancellationToken.cancel()
-
-    console.log(queue.messagesInTransit)
 
     expect(queue.messagesInTransit.size).toBe(0)
 
@@ -548,6 +544,39 @@ describe('MessageQueueBinaryFIFO', () => {
 
     cancellationTokenB.cancel()
     expect(queue.messages.length).toBe(0)
+
+    queue._resume()
+
+    device.disconnect()
+  })
+
+  it('clearing the queue should delete messages in transit', async () => {
+    const { spy, queue, device } = createQueueTestFixtures({})
+    queue._pause()
+
+    const queryMessage = new Message('a', null)
+    queryMessage.metadata.query = true
+    device.connect()
+
+    const cancellationToken = new CancellationToken()
+
+    queue._resume()
+
+    expect(queue.messagesInTransit.size).toBe(0)
+
+    device.write(queryMessage, cancellationToken).catch(err => {
+      if (cancellationToken.caused(err)) {
+        // all good
+      } else {
+        throw err
+      }
+    })
+
+    expect(queue.messagesInTransit.size).toBe(1)
+
+    queue.clearQueue()
+
+    expect(queue.messagesInTransit.size).toBe(0)
 
     queue._resume()
 

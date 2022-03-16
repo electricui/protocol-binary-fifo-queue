@@ -188,7 +188,6 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
 
     // If the message is cancelled, remove it from the messagesInTransit set
     queuedMessage.unanimousCancellationToken.getToken().subscribe(() => {
-      console.log(`unanimousCancellationToken cancelled`)
       this.messagesInTransit.delete(queuedMessage)
       this.messages = this.messages.filter(msg => msg !== queuedMessage)
     })
@@ -201,7 +200,7 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     return deferred.promise
   }
 
-  private clearQueue(reason: string) {
+  clearQueue() {
     // Cancel any outgoing messageIDs
     for (let index = 0; index < this.messages.length; index++) {
       const message = this.messages[index]
@@ -228,13 +227,11 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
 
     // this should already be 0
     if (this.messages.length !== 0) {
-      console.error("this.messages isn't empty")
       this.messages.length = 0
     }
 
     // this should already be 0
     if (this.messagesInTransit.size !== 0) {
-      console.error("messagesInTransit isn't empty")
       this.messagesInTransit.clear()
     }
   }
@@ -260,7 +257,7 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     dQueue(`Spinning up queue loop`)
 
     // clear the queue.
-    this.clearQueue('connecting')
+    this.clearQueue()
 
     dQueue(`Device connected, queue setup complete`)
   }
@@ -274,7 +271,7 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
     dQueue(`Spinning down queue loop`)
 
     // clear the queue
-    this.clearQueue('disconnecting')
+    this.clearQueue()
 
     dQueue(`Queue teardown complete`)
   }
