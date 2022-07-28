@@ -317,12 +317,34 @@ export class MessageQueueBinaryFIFO extends MessageQueue {
         // If this was a cancellation, reject up the chain
         dequeuedMessage.unanimousCancellationToken.getToken().caused(err)
       ) {
-        for (const deferred of dequeuedMessage.deferreds) {
-          deferred.deferred.reject(deferred.cancellationToken.token)
+        // If this was a cancellation, reject up the chain
+        if (dequeuedMessage.unanimousCancellationToken.getToken().caused(err)) {
+          for (const deferred of dequeuedMessage.deferreds) {
+            deferred.deferred.reject(deferred.cancellationToken.token)
+          }
+        } else {
+          // Otherwise pass the same error up the chain
+          for (const deferred of dequeuedMessage.deferreds) {
+            deferred.deferred.reject(err)
+          }
         }
+
+        console.error(
+          `Message ${dequeuedMessage.message.messageID} failed to send ${dequeuedMessage.retries} ${
+            dequeuedMessage.retries === 1 ? 'time' : 'times'
+          }. No longer retrying. Error:`,
+          err,
+        )
 
         return
       }
+
+      console.warn(
+        `Message ${dequeuedMessage.message.messageID} failed to send ${dequeuedMessage.retries} ${
+          dequeuedMessage.retries === 1 ? 'time' : 'times'
+        }. Retrying. Error:`,
+        err,
+      )
 
       // add it back to the queue and try again if we have retries left
       this.messages.unshift(dequeuedMessage)
