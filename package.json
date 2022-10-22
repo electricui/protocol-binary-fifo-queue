@@ -23,7 +23,7 @@
     "@electricui/protocol-binary-constants": "workspace:*",
     "better-queue": "^3.8.10",
     "bluebird": "^3.5.3",
-    "debug": "^4.3.1",
+    "debug": "^4.3.4",
     "deepmerge": "^4.1.1",
     "memoize-one": "^5.0.0",
     "rxjs": "^6.4.0",
